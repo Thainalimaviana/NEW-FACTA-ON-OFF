@@ -213,7 +213,7 @@
 
       async function consultarLote(lote) {
         try {
-          const res = await fetch("/consultar", {
+          const res = await fetch("/consultar-offline", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ cpfs: lote, tentativas, lote_id: currentLoteId })

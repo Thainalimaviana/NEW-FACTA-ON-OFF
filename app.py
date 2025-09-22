@@ -54,6 +54,11 @@ def gerar_token_offline():
         },
         timeout=10
     )
+
+    print("\n=== GERAR TOKEN OFFLINE ===")
+    print(f"STATUS: {response.status_code}")
+    print(f"BODY: {response.text}\n")
+
     data = response.json()
     return data.get("token")
 
@@ -67,6 +72,10 @@ def gerar_token_online():
         headers={"Authorization": TOKEN_AUTH_HEADER_ON, "Accept": "application/json"},
         timeout=10
     )
+    print("\n=== GERAR TOKEN ONLINE ===")
+    print(f"STATUS: {resp.status_code}")
+    print(f"BODY: {resp.text}\n")
+
     resp.raise_for_status()
     data = resp.json()
     novo_token = data.get("token")
@@ -117,10 +126,15 @@ def consultar_offline():
                 garantir_token()
                 response = requests.get(
                     API_URL_OFF,
-                    headers={"Authorization": f"Bearer {token_offline}", "Accept": "application/json"},
+                    headers={"Authorization": f"Bearer {token_offline}", "Accept": "application/json","User-Agent":"insomnia/11.2.0"},
                     params={"cpf": cpf},
                     timeout=15,
                 )
+
+                print(f"\n➡️ CONSULTA OFFLINE CPF {cpf}")
+                print(f"STATUS: {response.status_code}")
+                print(f"BODY: {response.text}\n")
+
                 requisicoes_usadas_com_token += 1
                 resp_json = response.json()
                 mensagem = (resp_json.get("mensagem", "") or "")
@@ -225,6 +239,29 @@ def consultar_online():
         conn.commit()
         conn.close()
     return jsonify(resultados)
+
+@app.route("/registrar-lote", methods=["POST"])
+def registrar_lote():
+    data_in = request.get_json(silent=True) or {}
+    cpfs = data_in.get("cpfs", [])
+    lote_id = data_in.get("lote_id")
+
+    if not isinstance(cpfs, list) or not cpfs:
+        return jsonify({"erro": "Lista de CPFs inválida"}), 400
+
+    ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    for cpf in cpfs:
+        c.execute("""
+            INSERT OR IGNORE INTO consultas (cpf, resultado, data, lote_id)
+            VALUES (?, ?, ?, ?)
+        """, (cpf, "Pendente", ts_now, lote_id))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"msg": f"{len(cpfs)} CPFs registrados no lote {lote_id}."})
 
 if __name__ == "__main__":
     app.run(debug=True, port=8800)
