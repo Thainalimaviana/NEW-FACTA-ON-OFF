@@ -250,13 +250,14 @@
             (r.Resultado || "").toLowerCase().includes("limite de tentativas")
           ) {
             pushLinha(`CPF: ${r.CPF}<br>Status: <strong>${r.Resultado}</strong><br><br>`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            await new Promise(resolve => setTimeout(resolve, 3000));
           }
 
-          if ((r.Resultado || "").toLowerCase().includes("autorizado")) {
+          if ((r.Resultado || "").toLowerCase().includes("não autorizado")) {
+            erro++;
+          } else if ((r.Resultado || "").toLowerCase().includes("autorizado")) {
             sucesso++;
           } else if (
-            (r.Resultado || "").toLowerCase().includes("não autorizado") ||
             (r.Resultado || "").toLowerCase().includes("consulta indisponível") ||
             (r.Resultado || "").toLowerCase().includes("limite de tentativas")
           ) {

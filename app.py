@@ -147,8 +147,8 @@ def consultar_offline():
 
                 if "base offline indisponivel" in msg_norm:
                     if tentativa < max_tentativas:
-                        print(f"⚠️ Base indisponível. Reconsultando CPF {cpf} em 5s...")
-                        time.sleep(5)
+                        print(f"⚠️ Base indisponível. Reconsultando CPF {cpf} em 2s...")
+                        time.sleep(2)
                         continue
                     else:
                         resultado_final["Resultado"] = "Limite de tentativas atingido"
@@ -213,7 +213,6 @@ def consultar_online():
             if response.status_code == 200:
                 resp_json = response.json()
 
-                # 🔑 Verifica token inválido (mais robusto)
                 if "token inválido" in normalizar(resp_json.get("mensagem", "")):
                     token = gerar_token_online()
                     response = requests.get(
@@ -238,7 +237,6 @@ def consultar_online():
                         resultado_final["Resultado"] = f"Saldo Bruto: {saldo_bruto} | Saldo Líquido: {saldo_liquido}"
                         resultado_final["Status"] = "Autorizado"
                     else:
-                        # caso venha só mensagem mas sem saldo
                         resultado_final["Resultado"] = mensagem or "Autorizado"
                         resultado_final["Status"] = "Autorizado"
                 else:
