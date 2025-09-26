@@ -147,6 +147,8 @@
     let sucesso = 0;
     let erro = 0;
     let currentLoteId = null;
+    let cancelar = false;
+    let abortController = null;
 
     const MAX_LOG = 100;
 
@@ -173,10 +175,18 @@
     }
 
     async function consultar() {
+      cancelar = false;
+      abortController = new AbortController();
+
       const cpfs = document.getElementById("cpfs").value
         .split("\n")
         .map(c => c.trim().padStart(11, "0"))
         .filter(c => c !== "");
+
+      if (!cpfs.length) {
+        pushLinha(`<b>⚠️ Nenhum CPF informado.</b><br><br>`);
+        return;
+      }
 
       const tentativas = parseInt(document.getElementById("tentativas").value || 1);
       const resultado = document.getElementById("result");
@@ -191,93 +201,105 @@
       currentLoteId = `L${Date.now()}`;
       document.getElementById("loteInfo").textContent = `Lote atual: ${currentLoteId}`;
 
-      try {
-        const respReg = await fetch("/registrar-lote", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ lote_id: currentLoteId, cpfs })
-        });
-        const regJson = await respReg.json();
-        if (!respReg.ok || regJson.erro) {
-          pushLinha(`<b>⚠️ Aviso:</b> falha ao registrar lote (${regJson.erro || respReg.status}). Prosseguindo mesmo assim.<br><br>`);
-        }
-      } catch (e) {
-        pushLinha(`<b>⚠️ Aviso:</b> erro no registro do lote (${e}). Prosseguindo mesmo assim.<br><br>`);
-      }
-
       resultadosGerais = cpfs.map(cpf => ({ CPF: cpf, Resultado: "Pendente" }));
 
       progressBar.style.width = "0%";
       progressText.innerText = "0%";
       resultado.innerHTML = "Iniciando consultas...<br><br>";
 
-      async function consultarLote(lote) {
-        try {
-          const res = await fetch("/consultar-offline", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ cpfs: lote, tentativas, lote_id: currentLoteId })
-          });
-
-          const dados = await res.json();
-          for (const r of dados) {
-            const index = resultadosGerais.findIndex(x => x.CPF === r.CPF);
-            if (index !== -1) resultadosGerais[index].Resultado = r.Resultado;
-
-            if (
-              (r.Resultado || "").toLowerCase().includes("autorizado") ||
-              (r.Resultado || "").toLowerCase().includes("não autorizado") ||
-              (r.Resultado || "").toLowerCase().includes("consulta indisponível") ||
-              (r.Resultado || "").toLowerCase().includes("limite de tentativas")
-            ) {
-              pushLinha(`CPF: ${r.CPF}<br>Status: <strong>${r.Resultado}</strong><br><br>`);
-              await new Promise(resolve => setTimeout(resolve, 5000));
-            }
-
-            if ((r.Resultado || "").toLowerCase().includes("não autorizado")) {
-              erro++;
-            } else if ((r.Resultado || "").toLowerCase().includes("autorizado")) {
-              sucesso++;
-            } else if (
-              (r.Resultado || "").toLowerCase().includes("consulta indisponível") ||
-              (r.Resultado || "").toLowerCase().includes("limite de tentativas")
-            ) {
-              erro++;
-            }
-
-            concluidos++;
-            const progresso = Math.round((concluidos / cpfs.length) * 100);
-            progressBar.style.width = `${progresso}%`;
-            progressText.innerText = `${progresso}%`;
-            atualizarContador();
-          }
-        } catch {
-          for (const cpf of lote) {
-            const index = resultadosGerais.findIndex(x => x.CPF === cpf);
-            if (index !== -1) resultadosGerais[index].Resultado = "Erro";
-
-            pushLinha(`CPF: ${cpf}<br>Status: <strong>Erro</strong><br><br>`);
-            await new Promise(resolve => setTimeout(resolve, 300));
-
-            erro++;
-            concluidos++;
-            const progresso = Math.round((concluidos / cpfs.length) * 100);
-            progressBar.style.width = `${progresso}%`;
-            progressText.innerText = `${progresso}%`;
-            atualizarContador();
-          }
-        }
-      }
-
       for (let i = 0; i < cpfs.length; i += batchSize) {
+        if (cancelar) {
+          pushLinha(`<b>⚠️ Consultas canceladas pelo usuário.</b><br><br>`);
+          break;
+        }
+
         while (pausado) {
           await new Promise(resolve => setTimeout(resolve, 300));
         }
+
         const lote = cpfs.slice(i, i + batchSize);
-        await consultarLote(lote);
+        await consultarLote(lote, tentativas, cpfs.length, progressBar, progressText, resultado, concluidos);
+        concluidos += lote.length;
       }
 
-      resultado.innerHTML += `<br>✅ Consultas finalizadas.`;
+      if (!cancelar) {
+        resultado.innerHTML += `<br>✅ Consultas finalizadas.`;
+      }
+    }
+
+    async function consultarLote(lote, tentativas, total, progressBar, progressText, resultado, concluidos) {
+      try {
+        const res = await fetch("/consultar-offline", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cpfs: lote, tentativas, lote_id: currentLoteId }),
+          signal: abortController.signal
+        });
+
+        const dados = await res.json();
+        for (const r of dados) {
+          if (cancelar) return;
+
+          const index = resultadosGerais.findIndex(x => x.CPF === r.CPF);
+          if (index !== -1) resultadosGerais[index].Resultado = r.Resultado;
+
+          if (
+            (r.Resultado || "").toLowerCase().includes("autorizado") ||
+            (r.Resultado || "").toLowerCase().includes("não autorizado") ||
+            (r.Resultado || "").toLowerCase().includes("consulta indisponível") ||
+            (r.Resultado || "").toLowerCase().includes("limite de tentativas")
+          ) {
+            pushLinha(`CPF: ${r.CPF}<br>Status: <strong>${r.Resultado}</strong><br><br>`);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+          }
+
+          if ((r.Resultado || "").toLowerCase().includes("autorizado")) {
+            sucesso++;
+          } else if (
+            (r.Resultado || "").toLowerCase().includes("não autorizado") ||
+            (r.Resultado || "").toLowerCase().includes("consulta indisponível") ||
+            (r.Resultado || "").toLowerCase().includes("limite de tentativas")
+          ) {
+            erro++;
+          }
+
+          const progresso = Math.round(((concluidos + 1) / total) * 100);
+          progressBar.style.width = `${progresso}%`;
+          progressText.innerText = `${progresso}%`;
+          atualizarContador();
+          concluidos++;
+        }
+      } catch (e) {
+        if (cancelar) return;
+        for (const cpf of lote) {
+          const index = resultadosGerais.findIndex(x => x.CPF === cpf);
+          if (index !== -1) resultadosGerais[index].Resultado = "Erro";
+
+          pushLinha(`CPF: ${cpf}<br>Status: <strong>Erro</strong><br><br>`);
+          await new Promise(resolve => setTimeout(resolve, 300));
+
+          erro++;
+        }
+      }
+    }
+
+    function limparCampos() {
+      cancelar = true;
+      if (abortController) abortController.abort();
+
+      document.getElementById("cpfs").value = "";
+      document.getElementById("tentativas").value = "1";
+      document.getElementById("result").innerHTML = "";
+      document.getElementById("progressBar").style.width = "0%";
+      document.getElementById("progressText").innerText = "0%";
+      document.getElementById("consultasRecuperadas").innerHTML = "";
+      document.getElementById("btnBaixarRecuperadas").style.display = "none";
+      document.getElementById("contador").innerText = "";
+      document.getElementById("loteInfo").textContent = "";
+      resultadosGerais = [];
+      sucesso = 0;
+      erro = 0;
+      currentLoteId = null;
     }
 
     async function baixarExcel() {
@@ -293,22 +315,6 @@
       a.download = "resultado_consulta.xlsx";
       a.click();
       window.URL.revokeObjectURL(url);
-    }
-
-    function limparCampos() {
-      document.getElementById("cpfs").value = "";
-      document.getElementById("tentativas").value = "1";
-      document.getElementById("result").innerHTML = "";
-      document.getElementById("progressBar").style.width = "0%";
-      document.getElementById("progressText").innerText = "0%";
-      document.getElementById("consultasRecuperadas").innerHTML = "";
-      document.getElementById("btnBaixarRecuperadas").style.display = "none";
-      document.getElementById("contador").innerText = "";
-      document.getElementById("loteInfo").textContent = "";
-      resultadosGerais = [];
-      sucesso = 0;
-      erro = 0;
-      currentLoteId = null;
     }
 
     function recuperarConsultas() {
