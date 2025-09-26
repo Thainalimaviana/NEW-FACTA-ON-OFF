@@ -231,7 +231,7 @@
               (r.Resultado || "").toLowerCase().includes("limite de tentativas")
             ) {
               pushLinha(`CPF: ${r.CPF}<br>Status: <strong>${r.Resultado}</strong><br><br>`);
-              await new Promise(resolve => setTimeout(resolve, 0));
+              await new Promise(resolve => setTimeout(resolve, 5000));
             }
 
             if ((r.Resultado || "").toLowerCase().includes("não autorizado")) {
@@ -257,7 +257,7 @@
             if (index !== -1) resultadosGerais[index].Resultado = "Erro";
 
             pushLinha(`CPF: ${cpf}<br>Status: <strong>Erro</strong><br><br>`);
-            await new Promise(resolve => setTimeout(resolve, 0)); // 👈 idem aqui
+            await new Promise(resolve => setTimeout(resolve, 300));
 
             erro++;
             concluidos++;

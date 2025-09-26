@@ -162,8 +162,13 @@ def consultar_offline():
                 break
 
             except Exception as e:
-                resultado_final["Resultado"] = f"Erro: {str(e)}"
-                break
+                print(f"❌ Erro na tentativa {tentativa}/{max_tentativas} para CPF {cpf}: {e}")
+                if tentativa < max_tentativas:
+                    time.sleep(5)
+                    continue
+                else:
+                    resultado_final["Resultado"] = "Limite de tentativas atingido"
+                    break
 
         resultados.append(resultado_final)
 
