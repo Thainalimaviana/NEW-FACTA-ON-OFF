@@ -263,5 +263,28 @@ def registrar_lote():
 
     return jsonify({"msg": f"{len(cpfs)} CPFs registrados no lote {lote_id}."})
 
+@app.route("/baixar-excel", methods=["POST"])
+def baixar_excel():
+    data_in = request.get_json(silent=True) or {}
+    resultados = data_in.get("resultados", [])
+
+    if not resultados:
+        return jsonify({"erro": "Sem resultados para exportar"}), 400
+
+    df = pd.DataFrame(resultados)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Consultas")
+
+    output.seek(0)
+
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name="resultado_consulta.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
 if __name__ == "__main__":
     app.run(debug=True, port=8800)
