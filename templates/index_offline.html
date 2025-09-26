@@ -148,7 +148,7 @@
     let erro = 0;
     let currentLoteId = null;
 
-    const MAX_LOG = 200;
+    const MAX_LOG = 100;
 
     function pushLinha(html) {
       const box = document.getElementById("result");
@@ -224,11 +224,24 @@
             const index = resultadosGerais.findIndex(x => x.CPF === r.CPF);
             if (index !== -1) resultadosGerais[index].Resultado = r.Resultado;
 
-            pushLinha(`CPF: ${r.CPF}<br>Status: <strong>${r.Resultado}</strong><br><br>`);
+            if (
+              (r.Resultado || "").toLowerCase().includes("autorizado") ||
+              (r.Resultado || "").toLowerCase().includes("não autorizado") ||
+              (r.Resultado || "").toLowerCase().includes("consulta indisponível") ||
+              (r.Resultado || "").toLowerCase().includes("limite de tentativas")
+            ) {
+              pushLinha(`CPF: ${r.CPF}<br>Status: <strong>${r.Resultado}</strong><br><br>`);
+              await new Promise(resolve => setTimeout(resolve, 0));
+            }
 
-            if ((r.Resultado || "").includes("Autorizado")) {
+            if ((r.Resultado || "").toLowerCase().includes("não autorizado")) {
+              erro++;
+            } else if ((r.Resultado || "").toLowerCase().includes("autorizado")) {
               sucesso++;
-            } else {
+            } else if (
+              (r.Resultado || "").toLowerCase().includes("consulta indisponível") ||
+              (r.Resultado || "").toLowerCase().includes("limite de tentativas")
+            ) {
               erro++;
             }
 
@@ -244,6 +257,7 @@
             if (index !== -1) resultadosGerais[index].Resultado = "Erro";
 
             pushLinha(`CPF: ${cpf}<br>Status: <strong>Erro</strong><br><br>`);
+            await new Promise(resolve => setTimeout(resolve, 0)); // 👈 idem aqui
 
             erro++;
             concluidos++;

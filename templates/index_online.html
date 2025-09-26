@@ -226,7 +226,8 @@
 
             pushLinha(`CPF: ${r.CPF}<br>Status: <strong>${r.Resultado}</strong><br><br>`);
 
-            if (r.Status === "Autorizado") {
+            if ((r.Status || "").toLowerCase().includes("autorizado") ||
+              (r.Resultado || "").toLowerCase().includes("autorizado")) {
               sucesso++;
             } else {
               erro++;

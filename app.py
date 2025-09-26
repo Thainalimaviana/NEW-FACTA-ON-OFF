@@ -84,7 +84,7 @@ def gerar_token_online():
 
     token_online = novo_token
     token_expira_em = datetime.now() + timedelta(minutes=59)
-    print(f"🔑 Novo token (ONLINE): {token_online[:15]}... válido até {token_expira_em.strftime('%H:%M:%S')}")
+    print(f"Novo token (ONLINE): {token_online[:15]}... válido até {token_expira_em.strftime('%H:%M:%S')}")
     return token_online
 
 def garantir_token_online():
@@ -126,12 +126,16 @@ def consultar_offline():
                 garantir_token()
                 response = requests.get(
                     API_URL_OFF,
-                    headers={"Authorization": f"Bearer {token_offline}", "Accept": "application/json","User-Agent":"insomnia/11.2.0"},
+                    headers={
+                        "Authorization": f"Bearer {token_offline}",
+                        "Accept": "application/json",
+                        "User-Agent": "insomnia/11.2.0"
+                    },
                     params={"cpf": cpf},
                     timeout=15,
                 )
 
-                print(f"\n➡️ CONSULTA OFFLINE CPF {cpf}")
+                print(f"\n➡️ CONSULTA OFFLINE CPF {cpf} | Tentativa {tentativa}/{max_tentativas}")
                 print(f"STATUS: {response.status_code}")
                 print(f"BODY: {response.text}\n")
 
@@ -142,18 +146,25 @@ def consultar_offline():
                 msg_norm = normalizar(mensagem)
 
                 if "base offline indisponivel" in msg_norm:
-                    resultado_final["Resultado"] = "Consulta indisponível"
-                    break
+                    if tentativa < max_tentativas:
+                        print(f"⚠️ Base indisponível. Reconsultando CPF {cpf} em 5s...")
+                        time.sleep(5)
+                        continue
+                    else:
+                        resultado_final["Resultado"] = "Limite de tentativas atingido"
+                        break
+
                 if not erro_flag:
-                    match = re.search(r"\d{2}/\d{2}/\d{4}", mensagem)
-                    data_limite = match.group(0) if match else "Data não informada"
-                    resultado_final["Resultado"] = f"Autorizado até {data_limite}"
+                    resultado_final["Resultado"] = mensagem or "Autorizado"
                     break
-                resultado_final["Resultado"] = "Não autorizado"
+
+                resultado_final["Resultado"] = mensagem or "Não autorizado"
                 break
+
             except Exception as e:
                 resultado_final["Resultado"] = f"Erro: {str(e)}"
                 break
+
         resultados.append(resultado_final)
 
         ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -170,6 +181,7 @@ def consultar_offline():
                       (resultado_final["CPF"], resultado_final["Resultado"], ts_now))
         conn.commit()
         conn.close()
+
     return jsonify(resultados)
 
 @app.route("/consultar-online", methods=["POST"])
@@ -192,9 +204,12 @@ def consultar_online():
                 params={"cpf": cpf},
                 timeout=15,
             )
+
             if response.status_code == 200:
                 resp_json = response.json()
-                if str(resp_json.get("mensagem", "")).lower().startswith("token inválido"):
+
+                # 🔑 Verifica token inválido (mais robusto)
+                if "token inválido" in normalizar(resp_json.get("mensagem", "")):
                     token = gerar_token_online()
                     response = requests.get(
                         API_URL_ON,
@@ -209,19 +224,27 @@ def consultar_online():
             if response.status_code == 200:
                 erro_flag = resp_json.get("erro", False)
                 mensagem = resp_json.get("mensagem", "")
-                if not erro_flag and "retorno" in resp_json:
-                    dados = resp_json.get("retorno", {})
-                    saldo_bruto = dados.get("saldo_total", "0")
-                    saldo_liquido = saldo_bruto
-                    resultado_final["Resultado"] = f"Saldo Bruto: {saldo_bruto} | Saldo Líquido: {saldo_liquido}"
-                    resultado_final["Status"] = "Autorizado"
+
+                if not erro_flag:
+                    if "retorno" in resp_json:
+                        dados = resp_json.get("retorno", {})
+                        saldo_bruto = dados.get("saldo_total", "0")
+                        saldo_liquido = saldo_bruto
+                        resultado_final["Resultado"] = f"Saldo Bruto: {saldo_bruto} | Saldo Líquido: {saldo_liquido}"
+                        resultado_final["Status"] = "Autorizado"
+                    else:
+                        # caso venha só mensagem mas sem saldo
+                        resultado_final["Resultado"] = mensagem or "Autorizado"
+                        resultado_final["Status"] = "Autorizado"
                 else:
                     resultado_final["Resultado"] = mensagem or "Não autorizado"
                     resultado_final["Status"] = "Não autorizado"
             else:
                 resultado_final["Resultado"] = f"Erro HTTP {response.status_code}"
+
         except Exception as e:
             resultado_final["Resultado"] = f"Erro: {str(e)}"
+
         resultados.append(resultado_final)
 
         ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -238,6 +261,7 @@ def consultar_online():
                       (resultado_final["CPF"], resultado_final["Resultado"], ts_now))
         conn.commit()
         conn.close()
+
     return jsonify(resultados)
 
 @app.route("/registrar-lote", methods=["POST"])
