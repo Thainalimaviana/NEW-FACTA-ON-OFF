@@ -2,15 +2,16 @@ from flask import Flask, request, jsonify, render_template, send_file
 import requests
 import pandas as pd
 import io
-import re
-import time
 import sqlite3
 from datetime import datetime, timedelta
 import os
 import unicodedata
 from database import init_db
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 app = Flask(__name__)
+init_db()
 
 DB_FILE = "consultas.db"
 RESULT_FOLDER = "resultados"
@@ -20,17 +21,17 @@ os.makedirs("recuperacoes", exist_ok=True)
 token_offline = None
 requisicoes_usadas_com_token = 0
 LIMITE_REQS_POR_TOKEN = 5000
-
 TOKEN_URL_OFF = "https://fgtsoff.facta.com.br/gera-token"
 TOKEN_AUTH_HEADER_OFF = "Basic OTY1NTI6ZjRzaXV0azJ1ZWNhNDVldXhnOXc="
 API_URL_OFF = "https://fgtsoff.facta.com.br/fgts/base-offline"
 
 token_online = None
 token_expira_em = None
-
 TOKEN_URL_ON = "https://webservice.facta.com.br/gera-token"
 TOKEN_AUTH_HEADER_ON = "Basic OTY1NTI6ZjRzaXV0azJ1ZWNhNDVldXhnOXc="
 API_URL_ON = "https://webservice.facta.com.br/fgts/saldo"
+
+executor = ThreadPoolExecutor(max_workers=3)
 
 @app.route("/")
 def menu():
@@ -44,26 +45,24 @@ def tela_offline():
 def tela_online():
     return render_template("index_online.html")
 
+
 def gerar_token_offline():
     response = requests.get(
         TOKEN_URL_OFF,
         headers={
             "Authorization": TOKEN_AUTH_HEADER_OFF,
             "Accept": "application/json",
-            "User-Agent": "insomnia/11.2.0"
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
         },
         timeout=10
     )
-
-    print("\n=== GERAR TOKEN OFFLINE ===")
-    print(f"STATUS: {response.status_code}")
-    print(f"BODY: {response.text}\n")
-
-    data = response.json()
+    data = {}
+    try:
+        data = response.json()
+    except Exception:
+        print("⚠️ Erro ao converter token OFFLINE para JSON")
     return data.get("token")
-
-def normalizar(txt):
-    return unicodedata.normalize("NFKD", txt).encode("ASCII", "ignore").decode().lower()
 
 def gerar_token_online():
     global token_online, token_expira_em
@@ -72,19 +71,10 @@ def gerar_token_online():
         headers={"Authorization": TOKEN_AUTH_HEADER_ON, "Accept": "application/json"},
         timeout=10
     )
-    print("\n=== GERAR TOKEN ONLINE ===")
-    print(f"STATUS: {resp.status_code}")
-    print(f"BODY: {resp.text}\n")
-
     resp.raise_for_status()
     data = resp.json()
-    novo_token = data.get("token")
-    if not novo_token:
-        raise RuntimeError(f"Não recebi token. Resposta: {resp.text}")
-
-    token_online = novo_token
+    token_online = data.get("token")
     token_expira_em = datetime.now() + timedelta(minutes=59)
-    print(f"Novo token (ONLINE): {token_online[:15]}... válido até {token_expira_em.strftime('%H:%M:%S')}")
     return token_online
 
 def garantir_token_online():
@@ -95,99 +85,158 @@ def garantir_token_online():
         return gerar_token_online()
     return token_online
 
-@app.route("/consultar-offline", methods=["POST"])
-def consultar_offline():
+def normalizar(txt):
+    return unicodedata.normalize("NFKD", txt).encode("ASCII", "ignore").decode().lower()
+
+
+def consulta_cpf_offline(cpf, max_tentativas, lote_id):
     global token_offline, requisicoes_usadas_com_token
-    data_in = request.get_json(silent=True) or {}
-    cpfs = data_in.get("cpfs", [])
-    max_tentativas = int(data_in.get("tentativas", 1))
-    lote_id = data_in.get("lote_id")
+    tentativa = 0
+    resultado_final = {"CPF": cpf, "Resultado": "Pendente"}
 
-    if not isinstance(cpfs, list) or not cpfs:
-        return jsonify({"erro": "Lista de CPFs vazia."}), 400
+    ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO consultas (cpf, resultado, data, lote_id) VALUES (?, ?, ?, ?)",
+              (cpf, "Pendente", ts_now, lote_id))
+    conn.commit()
+    conn.close()
 
-    def garantir_token():
-        global token_offline, requisicoes_usadas_com_token
-        if token_offline is None or requisicoes_usadas_com_token >= LIMITE_REQS_POR_TOKEN:
-            novo = gerar_token_offline()
-            if not novo:
-                raise RuntimeError("Não foi possível gerar o token OFFLINE")
-            token_offline = novo
-            requisicoes_usadas_com_token = 0
-            print("Novo token OFFLINE gerado.")
+    while tentativa < max_tentativas:
+        tentativa += 1
+        try:
+            if token_offline is None or requisicoes_usadas_com_token >= LIMITE_REQS_POR_TOKEN:
+                token_offline = gerar_token_offline()
+                requisicoes_usadas_com_token = 0
+                print(f"\n✅ Novo token OFFLINE gerado: {token_offline[:20]}...\n")
 
-    resultados = []
-    for cpf in cpfs:
-        tentativa = 0
-        resultado_final = {"CPF": cpf, "Resultado": "Erro"}
-        while tentativa < max_tentativas:
-            tentativa += 1
+            print(f"\n➡️ CONSULTA OFFLINE CPF {cpf} | Tentativa {tentativa}/{max_tentativas}")
+
+            response = requests.get(
+                API_URL_OFF,
+                headers={
+                    "Authorization": f"Bearer {token_offline}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0"
+                },
+                params={"cpf": cpf},
+                timeout=15,
+            )
+            requisicoes_usadas_com_token += 1
+
+            print(f"📡 STATUS: {response.status_code}")
+            print(f"📦 BODY: {response.text}\n")
+
+            resp_json = {}
             try:
-                garantir_token()
-                response = requests.get(
-                    API_URL_OFF,
-                    headers={
-                        "Authorization": f"Bearer {token_offline}",
-                        "Accept": "application/json",
-                        "User-Agent": "insomnia/11.2.0"
-                    },
-                    params={"cpf": cpf},
-                    timeout=15,
-                )
-
-                print(f"\n➡️ CONSULTA OFFLINE CPF {cpf} | Tentativa {tentativa}/{max_tentativas}")
-                print(f"STATUS: {response.status_code}")
-                print(f"BODY: {response.text}\n")
-
-                requisicoes_usadas_com_token += 1
                 resp_json = response.json()
-                mensagem = (resp_json.get("mensagem", "") or "")
-                erro_flag = resp_json.get("erro", True)
-                msg_norm = normalizar(mensagem)
+            except Exception:
+                print("⚠️ Resposta não era JSON válido")
 
-                if "base offline indisponivel" in msg_norm:
-                    if tentativa < max_tentativas:
-                        print(f"⚠️ Base indisponível. Reconsultando CPF {cpf} em 2s...")
-                        time.sleep(2)
-                        continue
-                    else:
-                        resultado_final["Resultado"] = "Limite de tentativas atingido"
-                        break
+            mensagem = (resp_json.get("mensagem", "") or "")
+            erro_flag = resp_json.get("erro", True)
+            msg_norm = normalizar(mensagem)
 
-                if not erro_flag:
-                    resultado_final["Resultado"] = mensagem or "Autorizado"
-                    break
-
-                resultado_final["Resultado"] = mensagem or "Não autorizado"
-                break
-
-            except Exception as e:
-                print(f"❌ Erro na tentativa {tentativa}/{max_tentativas} para CPF {cpf}: {e}")
+            if "base offline indisponivel" in msg_norm:
+                print("⚠️ Base offline indisponível, tentando novamente...")
                 if tentativa < max_tentativas:
-                    time.sleep(5)
+                    time.sleep(2)
                     continue
                 else:
                     resultado_final["Resultado"] = "Limite de tentativas atingido"
                     break
 
-        resultados.append(resultado_final)
+            if not erro_flag:
+                resultado_final["Resultado"] = mensagem or "Autorizado"
+                break
 
-        ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        if lote_id:
+            resultado_final["Resultado"] = mensagem or "Não autorizado"
+            break
+
+        except Exception as e:
+            print(f"❌ Erro na tentativa {tentativa}/{max_tentativas} CPF {cpf}: {e}")
+            if tentativa >= max_tentativas:
+                resultado_final["Resultado"] = "Erro"
+
+        finally:
+            ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
             c.execute("UPDATE consultas SET resultado=?, data=? WHERE cpf=? AND lote_id=?",
-                      (resultado_final["Resultado"], ts_now, resultado_final["CPF"], lote_id))
-            if c.rowcount == 0:
-                c.execute("INSERT INTO consultas (cpf, resultado, data, lote_id) VALUES (?, ?, ?, ?)",
-                          (resultado_final["CPF"], resultado_final["Resultado"], ts_now, lote_id))
-        else:
-            c.execute("INSERT INTO consultas (cpf, resultado, data) VALUES (?, ?, ?)",
-                      (resultado_final["CPF"], resultado_final["Resultado"], ts_now))
-        conn.commit()
-        conn.close()
+                      (resultado_final["Resultado"], ts_now, cpf, lote_id))
+            conn.commit()
+            conn.close()
 
+            print(f"💾 Resultado salvo no banco | CPF {cpf} -> {resultado_final['Resultado']}")
+
+    return resultado_final
+
+@app.route("/consultar-offline", methods=["POST"])
+def consultar_offline():
+    data_in = request.get_json(silent=True) or {}
+    cpfs = data_in.get("cpfs", [])
+    max_tentativas = int(data_in.get("tentativas", 1))
+    lote_id = data_in.get("lote_id")
+
+    if not cpfs:
+        return jsonify({"erro": "Lista de CPFs vazia."}), 400
+
+    futures = [executor.submit(consulta_cpf_offline, cpf, max_tentativas, lote_id) for cpf in cpfs]
+    resultados = [f.result() for f in as_completed(futures)]
     return jsonify(resultados)
+
+
+def consulta_cpf_online(cpf, lote_id):
+    resultado_final = {"CPF": cpf, "Resultado": "Pendente"}
+
+    ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO consultas (cpf, resultado, data, lote_id) VALUES (?, ?, ?, ?)",
+              (cpf, "Pendente", ts_now, lote_id))
+    conn.commit()
+    conn.close()
+
+    try:
+        token = garantir_token_online()
+        response = requests.get(
+            API_URL_ON,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            params={"cpf": cpf},
+            timeout=10,
+        )
+
+        if response.status_code == 200:
+            resp_json = response.json()
+            erro_flag = resp_json.get("erro", False)
+            mensagem = resp_json.get("mensagem", "")
+
+            if not erro_flag:
+                if "retorno" in resp_json:
+                    dados = resp_json.get("retorno", {})
+                    saldo_bruto = dados.get("saldo_total", "0")
+                    resultado_final["Resultado"] = f"Saldo Bruto: {saldo_bruto}"
+                else:
+                    resultado_final["Resultado"] = mensagem or "Autorizado"
+            else:
+                resultado_final["Resultado"] = mensagem or "Não autorizado"
+        else:
+            resultado_final["Resultado"] = f"Erro HTTP {response.status_code}"
+
+    except Exception as e:
+        resultado_final["Resultado"] = f"Erro: {str(e)}"
+
+
+    ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE consultas SET resultado=?, data=? WHERE cpf=? AND lote_id=?",
+              (resultado_final["Resultado"], ts_now, cpf, lote_id))
+    conn.commit()
+    conn.close()
+
+    return resultado_final
 
 @app.route("/consultar-online", methods=["POST"])
 def consultar_online():
@@ -195,123 +244,68 @@ def consultar_online():
     cpfs = data_in.get("cpfs", [])
     lote_id = data_in.get("lote_id")
 
-    if not isinstance(cpfs, list) or not cpfs:
+    if not cpfs:
         return jsonify({"erro": "Lista de CPFs vazia."}), 400
 
-    resultados = []
-    for cpf in cpfs:
-        resultado_final = {"CPF": cpf, "Resultado": "Erro", "Status": "Não autorizado"}
-        try:
-            token = garantir_token_online()
-            response = requests.get(
-                API_URL_ON,
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                params={"cpf": cpf},
-                timeout=15,
-            )
-
-            if response.status_code == 200:
-                resp_json = response.json()
-
-                if "token inválido" in normalizar(resp_json.get("mensagem", "")):
-                    token = gerar_token_online()
-                    response = requests.get(
-                        API_URL_ON,
-                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                        params={"cpf": cpf},
-                        timeout=15,
-                    )
-                    resp_json = response.json()
-            else:
-                resp_json = {}
-
-            if response.status_code == 200:
-                erro_flag = resp_json.get("erro", False)
-                mensagem = resp_json.get("mensagem", "")
-
-                if not erro_flag:
-                    if "retorno" in resp_json:
-                        dados = resp_json.get("retorno", {})
-                        saldo_bruto = dados.get("saldo_total", "0")
-                        saldo_liquido = saldo_bruto
-                        resultado_final["Resultado"] = f"Saldo Bruto: {saldo_bruto} | Saldo Líquido: {saldo_liquido}"
-                        resultado_final["Status"] = "Autorizado"
-                    else:
-                        resultado_final["Resultado"] = mensagem or "Autorizado"
-                        resultado_final["Status"] = "Autorizado"
-                else:
-                    resultado_final["Resultado"] = mensagem or "Não autorizado"
-                    resultado_final["Status"] = "Não autorizado"
-            else:
-                resultado_final["Resultado"] = f"Erro HTTP {response.status_code}"
-
-        except Exception as e:
-            resultado_final["Resultado"] = f"Erro: {str(e)}"
-
-        resultados.append(resultado_final)
-
-        ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        if lote_id:
-            c.execute("UPDATE consultas SET resultado=?, data=? WHERE cpf=? AND lote_id=?",
-                      (resultado_final["Resultado"], ts_now, resultado_final["CPF"], lote_id))
-            if c.rowcount == 0:
-                c.execute("INSERT INTO consultas (cpf, resultado, data, lote_id) VALUES (?, ?, ?, ?)",
-                          (resultado_final["CPF"], resultado_final["Resultado"], ts_now, lote_id))
-        else:
-            c.execute("INSERT INTO consultas (cpf, resultado, data) VALUES (?, ?, ?)",
-                      (resultado_final["CPF"], resultado_final["Resultado"], ts_now))
-        conn.commit()
-        conn.close()
-
+    futures = [executor.submit(consulta_cpf_online, cpf, lote_id) for cpf in cpfs]
+    resultados = [f.result() for f in as_completed(futures)]
     return jsonify(resultados)
 
-@app.route("/registrar-lote", methods=["POST"])
-def registrar_lote():
-    data_in = request.get_json(silent=True) or {}
-    cpfs = data_in.get("cpfs", [])
-    lote_id = data_in.get("lote_id")
 
-    if not isinstance(cpfs, list) or not cpfs:
-        return jsonify({"erro": "Lista de CPFs inválida"}), 400
-
-    ts_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+@app.route("/baixar-excel/<lote_id>")
+def baixar_excel(lote_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    for cpf in cpfs:
-        c.execute("""
-            INSERT OR IGNORE INTO consultas (cpf, resultado, data, lote_id)
-            VALUES (?, ?, ?, ?)
-        """, (cpf, "Pendente", ts_now, lote_id))
-    conn.commit()
+    c.execute("SELECT cpf, resultado, data FROM consultas WHERE lote_id=? ORDER BY id", (lote_id,))
+    rows = c.fetchall()
     conn.close()
 
-    return jsonify({"msg": f"{len(cpfs)} CPFs registrados no lote {lote_id}."})
-
-@app.route("/baixar-excel", methods=["POST"])
-def baixar_excel():
-    data_in = request.get_json(silent=True) or {}
-    resultados = data_in.get("resultados", [])
+    resultados = [{"CPF": r[0], "Resultado": r[1], "Data": r[2]} for r in rows]
 
     if not resultados:
-        return jsonify({"erro": "Sem resultados para exportar"}), 400
+        return jsonify({"erro": f"Nenhum resultado encontrado para o lote {lote_id}"}), 400
 
     df = pd.DataFrame(resultados)
-
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Consultas")
-
+        df.to_excel(writer, index=False, sheet_name=f"Lote_{lote_id}")
     output.seek(0)
 
     return send_file(
         output,
         as_attachment=True,
-        download_name="resultado_consulta.xlsx",
+        download_name=f"resultado_{lote_id}.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+@app.route("/status-lote/<lote_id>")
+def status_lote(lote_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT cpf, resultado, data FROM consultas WHERE lote_id=? ORDER BY id", (lote_id,))
+    rows = c.fetchall()
+    conn.close()
+
+    return jsonify([{"CPF": r[0], "Resultado": r[1], "Data": r[2]} for r in rows])
+
+@app.route("/recuperar-ultimos")
+def recuperar_ultimos():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT lote_id FROM consultas WHERE lote_id IS NOT NULL ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+
+    if not row:
+        conn.close()
+        return jsonify([])
+
+    ultimo_lote = row[0]
+    c.execute("SELECT cpf, resultado, data FROM consultas WHERE lote_id=? ORDER BY id", (ultimo_lote,))
+    rows = c.fetchall()
+    conn.close()
+
+    return jsonify([{"CPF": r[0], "Resultado": r[1], "Data": r[2]} for r in rows])
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=8800)
